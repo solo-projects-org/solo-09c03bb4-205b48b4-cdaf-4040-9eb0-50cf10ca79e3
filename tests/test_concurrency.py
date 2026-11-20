@@ -153,3 +153,93 @@ def test_queries_are_consistent_under_concurrent_writes(tmp_path):
 
     assert not errors, errors
     assert not anomalies, anomalies[:5]
+
+
+def test_concurrent_identical_errata_create_one_record(tmp_path):
+    from app.db import init_db
+    from app.service import correct_report
+
+    db_path = tmp_path / "race4.db"
+    init_db(db_path)
+    seed = connect(db_path)
+    create_report(seed, build_report(1, 1, 1000, ["7"]))
+    seed.close()
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        conn = connect(db_path)
+        try:
+            barrier.wait()
+            results.append(correct_report(conn, 1, 1, 100, 5000))
+        except Exception as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, errors
+    assert sum(1 for r in results if r.created) == 1
+    check = connect(db_path)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM report_corrections").fetchone()[0] == 1
+        assert check.execute("SELECT COUNT(*) FROM report_coverage").fetchone()[0] == 2
+        assert query_range(check, 1, 100).summary["pending"] == 100
+        # 1-100 moves 7 -> 5006; 5000-5000 is the start of the new run.
+        assert query_range(check, 5006, 5006).summary["fail"] == 1
+    finally:
+        check.close()
+
+
+def test_concurrent_conflicting_errata_only_one_wins(tmp_path):
+    from app.db import init_db
+    from app.service import ConflictError, correct_report
+
+    db_path = tmp_path / "race5.db"
+    init_db(db_path)
+    seed = connect(db_path)
+    create_report(seed, build_report(1, 1, 1000, []))
+    seed.close()
+
+    outcomes = []
+    barrier = threading.Barrier(6)
+    lock = threading.Lock()
+
+    def worker(new_first):
+        conn = connect(db_path)
+        try:
+            barrier.wait()
+            try:
+                correct_report(conn, 1, 1, 100, new_first)
+                with lock:
+                    outcomes.append(("ok", new_first))
+            except ConflictError:
+                with lock:
+                    outcomes.append(("conflict", new_first))
+        finally:
+            conn.close()
+
+    threads = [
+        threading.Thread(target=worker, args=(n,)) for n in (5000, 5000, 5000, 6000, 6000, 6000)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sum(1 for kind, _ in outcomes if kind == "ok") == 3
+    assert sum(1 for kind, _ in outcomes if kind == "conflict") == 3
+    winners = {n for kind, n in outcomes if kind == "ok"}
+    assert len(winners) == 1
+    check = connect(db_path)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM report_corrections").fetchone()[0] == 1
+    finally:
+        check.close()

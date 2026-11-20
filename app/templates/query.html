@@ -81,14 +81,21 @@
 
   <section class="card">
     <h2>依据报告快照</h2>
-    <p class="hint">结论与依据来自同一次读取的同一份已提交数据；重启后仍可重现。</p>
+    <p class="hint">结论与依据来自同一次读取的同一份已提交数据；重启后仍可重现。勘误过的报告列出实际生效覆盖。</p>
     <table>
-      <thead><tr><th>报告号</th><th>覆盖范围</th><th>不合格数</th><th>接收时间</th></tr></thead>
+      <thead><tr><th>报告号</th><th>生效覆盖</th><th>不合格数</th><th>接收时间</th></tr></thead>
       <tbody>
       {% for e in result.evidence %}
         <tr>
-          <td><a href="/reports/{{ e.report_no }}">#{{ e.report_no }}</a></td>
-          <td class="range">{{ e.serial_first }} – {{ e.serial_last }}</td>
+          <td><a href="/reports/{{ e.report_no }}">#{{ e.report_no }}</a>
+            {% if e.corrected %}<span class="tag pending">已勘误</span>{% endif %}</td>
+          <td class="range">
+            {% if e.corrected %}
+              {% for c in e.coverage %}{{ c.serial_first }} – {{ c.serial_last }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+            {% else %}
+              {{ e.serial_first }} – {{ e.serial_last }}
+            {% endif %}
+          </td>
           <td class="num">{{ e.failed_count }}</td>
           <td class="muted">{{ e.created_at }}</td>
         </tr>

@@ -36,17 +36,20 @@
     <div class="stat"><span>报告总数</span><strong>{{ overview.total }}</strong></div>
     <div class="stat ok"><span>有效</span><strong>{{ overview.active }}</strong></div>
     <div class="stat muted"><span>已撤回</span><strong>{{ overview.retracted }}</strong></div>
+    <div class="stat"><span>已勘误</span><strong>{{ overview.corrected }}</strong></div>
     <div class="stat"><span>不合格记录</span><strong>{{ "{:,}".format(overview.failed_entries) }}</strong></div>
   </div>
   <table>
     <thead>
-      <tr><th>报告号</th><th>覆盖号段</th><th>编号数</th><th>不合格数</th><th>状态</th><th>接收时间</th><th></th></tr>
+      <tr><th>报告号</th><th>原报告号段</th><th>编号数</th><th>不合格数</th><th>状态</th><th>接收时间</th><th></th></tr>
     </thead>
     <tbody>
     {% for r in reports %}
       <tr id="report-{{ r.report_no }}" class="{{ 'retracted' if r.retracted }}">
         <td><a href="/reports/{{ r.report_no }}">#{{ r.report_no }}</a></td>
-        <td class="range">{{ r.serial_first }} – {{ r.serial_last }}</td>
+        <td class="range">{{ r.serial_first }} – {{ r.serial_last }}
+          {% if r.correction %}<br><span class="hint">勘误 {{ r.correction.orig_first }}–{{ r.correction.orig_last }} → {{ r.correction.new_first }}–{{ r.correction.new_last }}</span>{% endif %}
+        </td>
         <td class="num">{{ "{:,}".format(r.serial_span) }}</td>
         <td class="num">{{ r.failed_count }}</td>
         <td>

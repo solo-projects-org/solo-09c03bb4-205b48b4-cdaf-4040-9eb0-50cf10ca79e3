@@ -5,10 +5,16 @@ tested directly.  Ranges are inclusive at the API boundary and half-open
 ``[lo, hi)`` inside, so a range spanning a million serials is one report row and
 one query segment -- never a million rows.
 
-Ruling for serial ``s``: among non-retracted reports whose inclusive range
+Ruling for serial ``s``: among non-retracted reports whose effective coverage
 covers ``s``, take the one with the greatest ``report_no``.  ``s`` fails iff it
-appears in that report's failed list, otherwise it passes.  No covering report
-=> pending (待检).
+appears in that report's effective failure list, otherwise it passes.  No
+covering report => pending (待检).
+
+An erratum (勘误) moves one contiguous segment inside a report's *original*
+range to an equal-length new run of serials.  The uploaded range and failure
+list are archived, never rewritten; the effective coverage and failure list are
+derived from them.  Serials vacated by the move are re-ruled by the remaining
+reports.  Each report accepts at most one erratum.
 """
 
 from __future__ import annotations
@@ -227,8 +233,15 @@ class RetractResult:
     report: dict
 
 
+@dataclass
+class CorrectionResult:
+    created: bool  # False: identical erratum already on record
+    correction: dict
+    report: dict
+
+
 def _row_to_report(row) -> dict:
-    return {
+    report = {
         "report_no": row["report_no"],
         "serial_first": row["serial_first"],
         "serial_last": row["serial_last"],
@@ -238,19 +251,85 @@ def _row_to_report(row) -> dict:
         "retracted": bool(row["retracted"]),
         "created_at": row["created_at"],
         "retracted_at": row["retracted_at"],
+        "correction": None,
+    }
+    keys = row.keys()
+    if "corr_new_first" in keys and row["corr_new_first"] is not None:
+        report["correction"] = {
+            "orig_first": row["corr_orig_first"],
+            "orig_last": row["corr_orig_last"],
+            "new_first": row["corr_new_first"],
+            "new_last": row["corr_new_last"],
+        }
+    return report
+
+
+_FULL_REPORT_SELECT = """
+    SELECT r.*,
+           c.orig_first AS corr_orig_first,
+           c.orig_last  AS corr_orig_last,
+           c.new_first  AS corr_new_first,
+           c.new_last   AS corr_new_last
+    FROM reports r
+    LEFT JOIN report_corrections c ON c.report_id = r.id
+"""
+
+
+def _row_to_correction(row) -> dict:
+    return {
+        "orig_first": row["orig_first"],
+        "orig_last": row["orig_last"],
+        "new_first": row["new_first"],
+        "new_last": row["new_last"],
+        "created_at": row["created_at"],
     }
 
 
 def _get_row(conn, report_no: int):
     return conn.execute(
-        "SELECT * FROM reports WHERE report_no = ?", (report_no,)
+        _FULL_REPORT_SELECT + " WHERE r.report_no = ?", (report_no,)
     ).fetchone()
+
+
+def _coverage_rows(conn, report_id: int) -> list[tuple[int, int]]:
+    return [
+        (row[0], row[1])
+        for row in conn.execute(
+            "SELECT lo, hi FROM report_coverage WHERE report_id = ? ORDER BY lo",
+            (report_id,),
+        )
+    ]
+
+
+def _correction_row(conn, report_id: int):
+    return conn.execute(
+        "SELECT * FROM report_corrections WHERE report_id = ?", (report_id,)
+    ).fetchone()
+
+
+def _write_coverage(conn, report_id: int, pieces: Iterable[tuple[int, int]]) -> None:
+    """Replace a report's effective coverage.  Adjacent pieces are merged so a
+    correction that abuts its remainder yields a single interval."""
+    merged: list[list[int]] = []
+    for lo, hi in sorted(pieces):
+        if lo >= hi:
+            continue
+        if merged and merged[-1][1] >= lo:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    conn.execute("DELETE FROM report_coverage WHERE report_id = ?", (report_id,))
+    conn.executemany(
+        "INSERT INTO report_coverage (report_id, lo, hi) VALUES (?, ?, ?)",
+        ((report_id, lo, hi) for lo, hi in merged),
+    )
 
 
 def create_report(conn, report: ReportInput) -> CreateResult:
     """Insert a report or recognise an identical re-upload.
 
-    - same number + same content  -> no-op, original state (incl. retracted) kept
+    - same number + same content  -> no-op, original state (incl. retracted
+      and any erratum) kept
     - same number + other content -> ConflictError, nothing written
     """
     digest = report.content_hash
@@ -280,6 +359,10 @@ def create_report(conn, report: ReportInput) -> CreateResult:
             ),
         )
         report_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO report_coverage (report_id, lo, hi) VALUES (?, ?, ?)",
+            (report_id, report.serial_first, report.serial_last + 1),
+        )
         if report.failures:
             conn.executemany(
                 "INSERT INTO failed_serials (report_id, serial) VALUES (?, ?)",
@@ -292,7 +375,11 @@ def create_report(conn, report: ReportInput) -> CreateResult:
 
 
 def retract_report(conn, report_no: int) -> RetractResult:
-    """Retract (撤回) a report.  Idempotent.  Never deletes data."""
+    """Retract (撤回) a report.  Idempotent.  Never deletes data.
+
+    The erratum, if any, is kept on record but stops taking part in rulings
+    because the whole report is excluded while retracted.
+    """
     with write_tx(conn):
         row = _get_row(conn, report_no)
         if row is None:
@@ -307,10 +394,159 @@ def retract_report(conn, report_no: int) -> RetractResult:
         return RetractResult(True, _row_to_report(row))
 
 
+# ---------------------------------------------------------------------------
+# Errata (勘误): move a segment of a report to a new run of serials
+
+
+def correct_report(
+    conn,
+    report_no: int,
+    orig_first: object,
+    orig_last: object,
+    new_first: object,
+) -> CorrectionResult:
+    """Apply the single erratum allowed for a report.
+
+    The segment ``[orig_first, orig_last]`` of the *original* range and the
+    failures inside it move, in order, to the equal-length run starting at
+    ``new_first``.  ``new_first`` may overlap the moved segment.  The new run
+    must stay within ``0..MAX_SERIAL`` and must not touch any serial of this
+    report that is not moving.  Serials of other reports are not reserved:
+    reports overlap by design and the highest report number rules.
+
+    Repeating the identical request returns the recorded erratum (no second
+    write), even after retraction.  A different request for an already
+    corrected report is a conflict.  A retracted report rejects its first
+    erratum.
+    """
+    o_lo = parse_range_field(orig_first, "待改起始编号")
+    o_hi = parse_range_field(orig_last, "待改结束编号")
+    n_lo = parse_range_field(new_first, "正确起号")
+    with write_tx(conn):
+        row = _get_row(conn, report_no)
+        if row is None:
+            raise NotFoundError(f"报告号 {report_no} 不存在")
+        report_id = row["id"]
+        existing = _correction_row(conn, report_id)
+        if existing is not None:
+            if (
+                existing["orig_first"],
+                existing["orig_last"],
+                existing["new_first"],
+            ) == (o_lo, o_hi, n_lo):
+                return CorrectionResult(
+                    False,
+                    _row_to_correction(existing),
+                    _row_to_report(row),
+                )
+            raise ConflictError(
+                f"报告 {report_no} 已勘误为 {existing['new_first']}–"
+                f"{existing['new_last']}，不能再次勘误"
+            )
+        if row["retracted"]:
+            raise ConflictError(f"报告 {report_no} 已撤回，不能再勘误")
+
+        report = _row_to_report(row)
+        if o_lo > o_hi:
+            raise ValidationError("待改起始编号不能大于待改结束编号")
+        if o_lo < report["serial_first"] or o_hi > report["serial_last"]:
+            raise ValidationError(
+                f"待改号段必须落在原报告号段 "
+                f"{report['serial_first']}–{report['serial_last']} 之内"
+            )
+        n_hi = n_lo + (o_hi - o_lo)
+        if n_hi > MAX_SERIAL:
+            raise ValidationError(
+                f"新号段 {n_lo}–{n_hi} 超出可表示范围（最大 {MAX_SERIAL}）"
+            )
+
+        # -- occupancy: this report's own not-moving serials.  Before its first
+        # correction its coverage is exactly the uploaded range, so the new run
+        # may only reuse that range inside the moving segment.  Serials of
+        # *other* reports are not reserved: reports overlap by design and the
+        # highest report number rules, so the erratum may point into them.
+        hit_first = max(report["serial_first"], n_lo)
+        hit_last = min(report["serial_last"], n_hi)
+        if hit_first <= hit_last:
+            blocked: list[str] = []
+            if hit_first < o_lo:
+                blocked.append(f"{hit_first}–{min(hit_last, o_lo - 1)}")
+            if hit_last > o_hi:
+                blocked.append(f"{max(hit_first, o_hi + 1)}–{hit_last}")
+            if blocked:
+                raise ConflictError(
+                    f"新号段 {n_lo}–{n_hi} 占用了本报告未移动的编号 "
+                    + "、".join(blocked)
+                )
+
+        # -- archive the uploaded failure list once, then rewrite it
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO original_failed_serials (report_id, serial)
+            SELECT report_id, serial FROM failed_serials WHERE report_id = ?
+            """,
+            (report_id,),
+        )
+        # Delete then insert rather than update in place: the shift is a
+        # permutation of the segment, and a row-by-row UPDATE could transiently
+        # collide with a row that is itself still waiting to move.
+        moved = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT serial FROM failed_serials
+                WHERE report_id = ? AND serial >= ? AND serial <= ?
+                """,
+                (report_id, o_lo, o_hi),
+            )
+        ]
+        conn.executemany(
+            "DELETE FROM failed_serials WHERE report_id = ? AND serial = ?",
+            ((report_id, serial) for serial in moved),
+        )
+        conn.executemany(
+            "INSERT INTO failed_serials (report_id, serial) VALUES (?, ?)",
+            ((report_id, serial - o_lo + n_lo) for serial in moved),
+        )
+
+        # -- effective coverage: drop the moving segment, add the new run
+        pieces: list[tuple[int, int]] = []
+        for lo, hi in _coverage_rows(conn, report_id):
+            left_hi = min(hi, o_lo)
+            right_lo = max(lo, o_hi + 1)
+            if lo < left_hi:
+                pieces.append((lo, left_hi))
+            if right_lo < hi:
+                pieces.append((right_lo, hi))
+        pieces.append((n_lo, n_hi + 1))
+        _write_coverage(conn, report_id, pieces)
+        conn.execute(
+            """
+            INSERT INTO report_corrections
+                (report_id, orig_first, orig_last, new_first, new_last, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (report_id, o_lo, o_hi, n_lo, n_hi, _now()),
+        )
+        failed_count = conn.execute(
+            "SELECT COUNT(*) FROM failed_serials WHERE report_id = ?", (report_id,)
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE reports SET failed_count = ? WHERE id = ?",
+            (failed_count, report_id),
+        )
+        correction = _correction_row(conn, report_id)
+        return CorrectionResult(
+            True,
+            _row_to_correction(correction),
+            _row_to_report(_get_row(conn, report_no)),
+        )
+
+
 def list_reports(conn, limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
     total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
     rows = conn.execute(
-        "SELECT * FROM reports ORDER BY report_no DESC LIMIT ? OFFSET ?",
+        _FULL_REPORT_SELECT + " ORDER BY r.report_no DESC LIMIT ? OFFSET ?",
         (limit, offset),
     ).fetchall()
     return [_row_to_report(row) for row in rows], total
@@ -336,6 +572,38 @@ def list_failures(conn, report_no: int, limit: int = 500) -> list[int]:
     ]
 
 
+def report_detail(conn, report_no: int) -> dict:
+    """Everything the detail page shows: uploaded facts, effective coverage,
+    erratum before/after, and both failure lists."""
+    row = _get_row(conn, report_no)
+    if row is None:
+        raise NotFoundError(f"报告号 {report_no} 不存在")
+    report_id = row["id"]
+    correction_row = _correction_row(conn, report_id)
+    correction = _row_to_correction(correction_row) if correction_row else None
+    coverage = [
+        {"serial_first": lo, "serial_last": hi - 1, "count": hi - lo}
+        for lo, hi in _coverage_rows(conn, report_id)
+    ]
+    if correction is None:
+        original_failures = None
+    else:
+        original_failures = [
+            r[0]
+            for r in conn.execute(
+                "SELECT serial FROM original_failed_serials WHERE report_id = ? ORDER BY serial",
+                (report_id,),
+            )
+        ]
+    return {
+        "report": _row_to_report(row),
+        "coverage": coverage,
+        "correction": correction,
+        "failures": list_failures(conn, report_no),
+        "original_failures": original_failures,
+    }
+
+
 def get_overview(conn) -> dict:
     row = conn.execute(
         """
@@ -343,7 +611,10 @@ def get_overview(conn) -> dict:
                COALESCE(SUM(CASE WHEN retracted = 0 THEN 1 ELSE 0 END), 0) AS active,
                COALESCE(SUM(CASE WHEN retracted = 1 THEN 1 ELSE 0 END), 0) AS retracted,
                COALESCE(SUM(failed_count), 0)             AS failed_entries,
-               MAX(CASE WHEN retracted = 0 THEN report_no END) AS max_active_no
+               MAX(CASE WHEN retracted = 0 THEN report_no END) AS max_active_no,
+               COALESCE(SUM(CASE WHEN EXISTS (
+                   SELECT 1 FROM report_corrections c WHERE c.report_id = reports.id
+               ) THEN 1 ELSE 0 END), 0)                   AS corrected
         FROM reports
         """
     ).fetchone()
@@ -353,6 +624,7 @@ def get_overview(conn) -> dict:
         "retracted": row["retracted"],
         "failed_entries": row["failed_entries"],
         "max_active_no": row["max_active_no"],
+        "corrected": row["corrected"],
     }
 
 
@@ -491,12 +763,14 @@ class _Tally:
 def _query(conn, qlo: int, qhi: int, max_segments: int) -> QueryResult:
     rows = conn.execute(
         """
-        SELECT id, report_no, serial_first, serial_last, failed_count, created_at
-        FROM reports
-        WHERE retracted = 0
-          AND serial_first < ?
-          AND serial_last >= ?
-        ORDER BY serial_first, report_no
+        SELECT c.report_id AS id, r.report_no, c.lo, c.hi,
+               r.failed_count, r.created_at, r.serial_first, r.serial_last
+        FROM report_coverage c
+        JOIN reports r ON r.id = c.report_id
+        WHERE r.retracted = 0
+          AND c.lo < ?
+          AND c.hi > ?
+        ORDER BY c.lo, r.report_no
         """,
         (qhi, qlo),
     ).fetchall()
@@ -504,8 +778,8 @@ def _query(conn, qlo: int, qhi: int, max_segments: int) -> QueryResult:
     # Clipped boundaries: every point where the winning report can change.
     boundaries = {qlo, qhi}
     for row in rows:
-        boundaries.add(max(qlo, row["serial_first"]))
-        boundaries.add(min(qhi, row["serial_last"] + 1))
+        boundaries.add(max(qlo, row["lo"]))
+        boundaries.add(min(qhi, row["hi"]))
     points = sorted(boundaries)
 
     heap: list[tuple[int, int, int]] = []  # (-report_no, report_id, hi_excl)
@@ -513,13 +787,13 @@ def _query(conn, qlo: int, qhi: int, max_segments: int) -> QueryResult:
     tally = _Tally()
     segments: list[Segment] = []
     detail_full = False
-    cursor = 0  # index into rows, ordered by serial_first
+    cursor = 0  # index into rows, ordered by lo
 
     for idx, x in enumerate(points[:-1]):
-        while cursor < len(rows) and rows[cursor]["serial_first"] <= x:
+        while cursor < len(rows) and rows[cursor]["lo"] <= x:
             row = rows[cursor]
             cursor += 1
-            hi_excl = min(qhi, row["serial_last"] + 1)
+            hi_excl = min(qhi, row["hi"])
             if hi_excl > x:
                 heapq.heappush(heap, (-row["report_no"], row["id"], hi_excl))
         while heap and heap[0][2] <= x:
@@ -587,17 +861,37 @@ def _query(conn, qlo: int, qhi: int, max_segments: int) -> QueryResult:
 
     covered_last = segments[-1].hi - 1 if segments else qlo - 1
     used = {key[1] for key in tally.order if key[1] is not None}
-    evidence = [
-        {
-            "report_no": row["report_no"],
-            "serial_first": row["serial_first"],
-            "serial_last": row["serial_last"],
-            "failed_count": row["failed_count"],
-            "created_at": row["created_at"],
-        }
-        for row in sorted(rows, key=lambda r: r["report_no"])
-        if row["report_no"] in used
-    ]
+    evidence: list[dict] = []
+    if used:
+        # Range and count are the effective ones, so the snapshot matches what
+        # actually ruled (an erratum may have moved part of a report).
+        for row in conn.execute(
+            """
+            SELECT r.id, r.report_no, r.serial_first, r.serial_last,
+                   r.failed_count, r.created_at
+            FROM reports r
+            WHERE r.report_no IN ({})
+            ORDER BY r.report_no
+            """.format(",".join("?" * len(used))),
+            tuple(used),
+        ):
+            ranges = _coverage_rows(conn, row["id"])
+            evidence.append(
+                {
+                    "report_no": row["report_no"],
+                    "serial_first": min(lo for lo, _ in ranges),
+                    "serial_last": max(hi for _, hi in ranges) - 1,
+                    "failed_count": row["failed_count"],
+                    "created_at": row["created_at"],
+                    "corrected": True
+                    if _correction_row(conn, row["id"]) is not None
+                    else False,
+                    "coverage": [
+                        {"serial_first": lo, "serial_last": hi - 1}
+                        for lo, hi in ranges
+                    ],
+                }
+            )
 
     return QueryResult(
         serial_first=qlo,

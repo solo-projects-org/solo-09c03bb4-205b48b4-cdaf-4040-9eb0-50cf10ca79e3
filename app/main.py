@@ -19,23 +19,25 @@ from . import service
 from .db import connect, init_db
 from .service import (
     CONCL_LABEL,
+    NotFoundError,
     ServiceError,
     ValidationError,
     build_report,
+    correct_report,
     create_report,
     decode_failure_csv,
     get_overview,
-    get_report,
-    list_failures,
     list_reports,
     parse_failure_csv,
     query_range,
+    report_detail,
     retract_report,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 templates.env.globals["CONCL_LABEL"] = CONCL_LABEL
+templates.env.globals["MAX_SERIAL"] = service.MAX_SERIAL
 
 
 def _db_path() -> Path:
@@ -64,6 +66,26 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
     def _render(request: Request, name: str, context: dict, status_code: int = 200):
         ctx = {"request": request, **context}
         return templates.TemplateResponse(request, name, ctx, status_code=status_code)
+
+    def _report_context(conn: sqlite3.Connection, report_no: int, **extra) -> dict:
+        detail = report_detail(conn, report_no)
+        return {
+            "title": f"报告 {report_no}",
+            "active_nav": "reports",
+            "report": detail["report"],
+            "coverage": detail["coverage"],
+            "correction": detail["correction"],
+            "failures": detail["failures"],
+            "original_failures": detail["original_failures"],
+            "corr_form": {
+                "orig_first": "",
+                "orig_last": "",
+                "new_first": "",
+            },
+            "flash": None,
+            "flash_kind": "ok",
+            **extra,
+        }
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(request: Request, exc: ServiceError):
@@ -202,18 +224,64 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
     def report_page(
         request: Request,
         report_no: int,
+        flash: str | None = None,
+        flash_kind: str = "ok",
         conn: sqlite3.Connection = Depends(get_db),
     ):
-        report = get_report(conn, report_no)
         return _render(
             request,
             "report.html",
-            {
-                "title": f"报告 {report_no}",
-                "active_nav": "reports",
-                "report": report,
-                "failures": list_failures(conn, report_no),
-            },
+            _report_context(conn, report_no, flash=flash, flash_kind=flash_kind),
+        )
+
+    @app.post("/reports/{report_no}/correct")
+    def correct(
+        request: Request,
+        report_no: int,
+        orig_first: str = Form(...),
+        orig_last: str = Form(...),
+        new_first: str = Form(...),
+        conn: sqlite3.Connection = Depends(get_db),
+    ):
+        try:
+            result = correct_report(conn, report_no, orig_first, orig_last, new_first)
+        except NotFoundError:
+            raise  # the shared handler renders the "report not found" page
+        except ServiceError as exc:
+            # Keep the typed values visible on the detail page.
+            return _render(
+                request,
+                "report.html",
+                _report_context(
+                    conn,
+                    report_no,
+                    flash=str(exc),
+                    flash_kind="error",
+                    corr_form={
+                        "orig_first": orig_first,
+                        "orig_last": orig_last,
+                        "new_first": new_first,
+                    },
+                ),
+                status_code=exc.status,
+            )
+        corr = result.correction
+        if result.created:
+            message = (
+                f"报告 {report_no} 已勘误：{corr['orig_first']}–{corr['orig_last']} "
+                f"移至 {corr['new_first']}–{corr['new_last']}"
+            )
+            kind = "ok"
+        else:
+            message = (
+                f"报告 {report_no} 已有相同勘误（{corr['orig_first']}–"
+                f"{corr['orig_last']} → {corr['new_first']}–{corr['new_last']}），"
+                f"未重复办理"
+            )
+            kind = "info"
+        return RedirectResponse(
+            f"/reports/{report_no}?flash={_quote(message)}&flash_kind={kind}",
+            status_code=303,
         )
 
     @app.post("/reports/{report_no}/retract")
@@ -273,7 +341,15 @@ def create_app(db_path: Path | str | None = None) -> FastAPI:
 
     @app.get("/api/reports/{report_no}")
     def api_report(report_no: int, conn: sqlite3.Connection = Depends(get_db)):
-        return get_report(conn, report_no)
+        detail = report_detail(conn, report_no)
+        # Keep the original flat fields and add the erratum view alongside.
+        return {
+            **detail["report"],
+            "coverage": detail["coverage"],
+            "correction": detail["correction"],
+            "failures": detail["failures"],
+            "original_failures": detail["original_failures"],
+        }
 
     @app.get("/api/query")
     def api_query(

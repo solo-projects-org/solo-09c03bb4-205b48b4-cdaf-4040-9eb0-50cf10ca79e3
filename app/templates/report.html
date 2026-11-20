@@ -1,12 +1,16 @@
 {% extends "base.html" %}
 {% block content %}
+{% if flash %}
+  <section class="card flash {{ flash_kind }}">{{ flash }}</section>
+{% endif %}
+
 <section class="card">
   <p><a href="/reports">← 返回报告台账</a></p>
   <h2>报告 #{{ report.report_no }}</h2>
   <div class="stats">
-    <div class="stat"><span>覆盖号段（含两端）</span><strong class="range">{{ report.serial_first }} – {{ report.serial_last }}</strong></div>
-    <div class="stat"><span>编号数</span><strong>{{ "{:,}".format(report.serial_span) }}</strong></div>
-    <div class="stat bad"><span>不合格数</span><strong>{{ report.failed_count }}</strong></div>
+    <div class="stat"><span>原报告号段（含两端）</span><strong class="range">{{ report.serial_first }} – {{ report.serial_last }}</strong></div>
+    <div class="stat"><span>原编号数</span><strong>{{ "{:,}".format(report.serial_span) }}</strong></div>
+    <div class="stat bad"><span>不合格数</span><strong>{{ "{:,}".format(report.failed_count) }}</strong></div>
     <div class="stat {{ 'muted' if report.retracted else 'ok' }}">
       <span>状态</span>
       <strong>{% if report.retracted %}已撤回{% else %}有效{% endif %}</strong>
@@ -18,7 +22,7 @@
   </p>
   <p class="hint">
     内容指纹 <code>{{ report.content_hash[:16] }}…</code>
-    （同号重传时用于判断是否同内容）
+    （同号重传时用于判断是否同内容；勘误不改变指纹）
   </p>
   {% if not report.retracted %}
     <form method="post" action="/reports/{{ report.report_no }}/retract" class="inline"
@@ -29,7 +33,74 @@
 </section>
 
 <section class="card">
-  <h2>不合格名单</h2>
+  <h2>勘误前后号段</h2>
+  {% if correction %}
+    <table>
+      <thead><tr><th>项</th><th>起始编号</th><th>结束编号</th><th>编号数</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>勘误前（原号段内待改段）</td>
+          <td class="range">{{ correction.orig_first }}</td>
+          <td class="range">{{ correction.orig_last }}</td>
+          <td class="num">{{ "{:,}".format(correction.orig_last - correction.orig_first + 1) }}</td>
+        </tr>
+        <tr>
+          <td>勘误后（新号段）</td>
+          <td class="range">{{ correction.new_first }}</td>
+          <td class="range">{{ correction.new_last }}</td>
+          <td class="num">{{ "{:,}".format(correction.new_last - correction.new_first + 1) }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="hint">勘误时间 {{ correction.created_at }} · 每份报告只办一次勘误，原上传内容保留在下方。</p>
+  {% else %}
+    <p class="hint">尚未勘误。原号段 {{ report.serial_first }} – {{ report.serial_last }} 即为当前生效覆盖。</p>
+  {% endif %}
+
+  <h3>当前生效覆盖（放行查询实际使用）</h3>
+  <table>
+    <thead><tr><th>起始编号</th><th>结束编号</th><th>编号数</th></tr></thead>
+    <tbody>
+    {% for c in coverage %}
+      <tr>
+        <td class="range">{{ c.serial_first }}</td>
+        <td class="range">{{ c.serial_last }}</td>
+        <td class="num">{{ "{:,}".format(c.count) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if correction %}
+    <p class="hint">被移走的原号段不再由本报告覆盖，其中的编号按其余报告重判。</p>
+  {% endif %}
+
+  {% if not correction and not report.retracted %}
+    <h3>办理勘误</h3>
+    <p class="hint">
+      填写原号段内待改的首末号与正确起号：这一段及其中的不合格编号按原顺序移到等长的新号段。
+      新号可与被移动段重叠，但须在 0–{{ "{:,}".format(MAX_SERIAL) }} 之内，且不能占用本报告未移动的编号。
+    </p>
+    <form method="post" action="/reports/{{ report.report_no }}/correct" class="row">
+      <label>待改起始编号
+        <input name="orig_first" inputmode="numeric" required value="{{ corr_form.orig_first }}">
+      </label>
+      <label>待改结束编号（含）
+        <input name="orig_last" inputmode="numeric" required value="{{ corr_form.orig_last }}">
+      </label>
+      <label>正确起号
+        <input name="new_first" inputmode="numeric" required value="{{ corr_form.new_first }}">
+      </label>
+      <button type="submit">办理勘误</button>
+    </form>
+  {% elif report.retracted and not correction %}
+    <p class="hint">报告已撤回，不能再办理首次勘误；重新启用不在本系统范围内。</p>
+  {% elif report.retracted %}
+    <p class="hint">报告已撤回，勘误记录保留但整份报告不参与判定。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>不合格名单（勘误后生效）</h2>
   {% if report.failed_count == 0 %}
     <p>名单为空，整段合格。</p>
   {% else %}
@@ -42,6 +113,16 @@
     </p>
     <div class="serial-list">
       {% for serial in failures %}<span class="chip">{{ serial }}</span>{% endfor %}
+    </div>
+  {% endif %}
+  {% if original_failures is not none %}
+    <h3>原上传名单（保留备查）</h3>
+    <p class="hint">
+      共 {{ "{:,}".format(original_failures|length) }} 条。
+      {% if original_failures|length > 500 %}以下列出前 500 条。{% endif %}
+    </p>
+    <div class="serial-list">
+      {% for serial in original_failures[:500] %}<span class="chip">{{ serial }}</span>{% endfor %}
     </div>
   {% endif %}
 </section>

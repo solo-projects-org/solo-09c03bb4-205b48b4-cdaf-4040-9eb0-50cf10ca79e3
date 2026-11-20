@@ -87,6 +87,17 @@ class Client:
     def retract(self, no):
         return self.request("POST", f"/reports/{no}/retract")
 
+    def correct(self, no, orig_first, orig_last, new_first):
+        body = (
+            f"orig_first={orig_first}&orig_last={orig_last}&new_first={new_first}"
+        ).encode()
+        return self.request(
+            "POST",
+            f"/reports/{no}/correct",
+            body,
+            {"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
     def query(self, first, last):
         status, body = self.request(
             "GET", f"/api/query?serial_first={first}&serial_last={last}"
@@ -239,33 +250,169 @@ def main() -> int:
             check("retract 101", c.retract(101)[0], 303)
             check("全部撤回后为待检", c.rows(1, 10), [(1, 10, "pending", None)])
 
-            print("5. 百万级号段：入库一条记录，查询不逐号展开")
+            print("5. 勘误：段内不合格号整体移到等长新号段")
+            check("upload 300", c.upload(300, 3000, 3999, "3100\n3101\n3200\n")[0], 303)
+            check("correct 300", c.correct(300, 3100, 3200, 7000)[0], 303)
+            check(
+                "原段空出、待检，其后编号仍由 300 判定",
+                c.rows(3095, 3205),
+                [
+                    (3095, 3099, "pass", 300),
+                    (3100, 3200, "pending", None),
+                    (3201, 3205, "pass", 300),
+                ],
+            )
+            check(
+                "新段按原顺序带上不合格号（3100→7000、3101→7001、3200→7100）",
+                c.rows(6995, 7105),
+                [
+                    (6995, 6999, "pending", None),
+                    (7000, 7001, "fail", 300),
+                    (7002, 7099, "pass", 300),
+                    (7100, 7100, "fail", 300),
+                    (7101, 7105, "pending", None),
+                ],
+            )
+            status, detail = c.request("GET", "/reports/300")
+            check("detail shows erratum section", "勘误前后号段" in detail, True)
+            check("detail shows before-段", "3100" in detail and "3200" in detail, True)
+            check("detail shows after-段", "7000" in detail and "7100" in detail, True)
+            check("detail keeps original list", "原上传名单" in detail, True)
+            check("detail has no second-erratum form", "办理勘误</h3>" in detail, False)
+
+            print("5b. 重叠移号：新号段可压在被移动段上，但不能压本报告未移动编号")
+            check("upload 301 (5000–5099, fail 5002)", c.upload(301, 5000, 5099, "5002\n")[0], 303)
+            check("overlap move 5000-5010 -> 4995-5005", c.correct(301, 5000, 5010, 4995)[0], 303)
+            check(
+                "overlap 4995–5005 takes only moved serials; 5006–5010 vacated",
+                c.rows(4990, 5020),
+                [
+                    (4990, 4994, "pending", None),
+                    (4995, 4996, "pass", 301),
+                    (4997, 4997, "fail", 301),      # 5002 moved to 4997
+                    (4998, 5005, "pass", 301),
+                    (5006, 5010, "pending", None),
+                    (5011, 5020, "pass", 301),
+                ],
+            )
+            check("upload 302 (6000–6199, fail 6001)", c.upload(302, 6000, 6199, "6001\n")[0], 303)
+            check(
+                "overlap into unmoved serials 6011–6015 is refused",
+                c.correct(302, 6000, 6010, 6005)[0],
+                409,
+            )
+            check(
+                "new run may point into another report's serials (overlap is legal)",
+                c.correct(302, 6000, 6010, 3000)[0],
+                303,
+            )
+            check(
+                "302 (higher number) now rules 3000–3010 inside 300's range;"
+                " 6001 moved to 3001 and fails there",
+                c.rows(3000, 3010),
+                [
+                    (3000, 3000, "pass", 302),
+                    (3001, 3001, "fail", 302),
+                    (3002, 3010, "pass", 302),
+                ],
+            )
+            check(
+                "302's vacated 6000–6010 is pending, rest of 302 still rules",
+                c.rows(6000, 6012),
+                [(6000, 6010, "pending", None), (6011, 6012, "pass", 302)],
+            )
+
+            print("5c. 同参重试 / 改参冲突 / 撤回后的勘误")
+            check("same erratum retried", c.correct(300, 3100, 3200, 7000)[0], 303)
+            check("different erratum rejected", c.correct(300, 3100, 3200, 7500)[0], 409)
+            check("retract 301", c.retract(301)[0], 303)
+            check(
+                "retracted corrected report no longer rules",
+                c.rows(4995, 5005)[0][2:],
+                ("pending", None),
+            )
+            check("same erratum after retraction is a replay", c.correct(301, 5000, 5010, 4995)[0], 303)
+            check("different erratum after retraction conflicts", c.correct(301, 5000, 5010, 4000)[0], 409)
+
+            print("6. 撤回已勘误报告：整份失效，重传原件保留勘误与撤回")
+            check("correct 300 retracted", c.retract(300)[0], 303)
+            check("new segment pending after retraction", c.rows(7000, 7001), [(7000, 7001, "pending", None)])
+            check("original re-upload accepted", c.upload(300, 3000, 3999, "3100\n3101\n3200\n")[0], 303)
+            status, detail = c.request("GET", "/reports/300")
+            check("re-upload keeps retracted state", "已撤回" in detail, True)
+            check("re-upload keeps erratum record", "7000" in detail and "7100" in detail, True)
+            check("still pending after re-upload", c.rows(7000, 7001), [(7000, 7001, "pending", None)])
+            check("report count unchanged by replay", json.loads(c.request("GET", "/api/reports")[1])["total"], 6)
+
+            print("7. 勘误后查询：依据报告快照展示生效覆盖")
+            check("upload 303", c.upload(303, 8000, 8099, "8050\n")[0], 303)
+            check("correct 303", c.correct(303, 8050, 8060, 9000)[0], 303)
+            check(
+                "vacated + moved segment ruled correctly",
+                c.rows(8045, 9015),
+                [
+                    (8045, 8049, "pass", 303),
+                    (8050, 8060, "pending", None),
+                    (8061, 8099, "pass", 303),
+                    (8100, 8999, "pending", None),
+                    (9000, 9000, "fail", 303),
+                    (9001, 9010, "pass", 303),
+                    (9011, 9015, "pending", None),
+                ],
+            )
+            status, html = c.request("GET", "/query?serial_first=8045&serial_last=9015")
+            check("query page renders after erratum", status, 200)
+            evidence = c.query(8061, 8061)["evidence"]
+            check("evidence lists corrected report", [e["report_no"] for e in evidence], [303])
+            check("evidence marks corrected report", evidence[0]["corrected"], True)
+            check("evidence shows effective coverage", evidence[0]["coverage"], [
+                {"serial_first": 8000, "serial_last": 8049},
+                {"serial_first": 8061, "serial_last": 8099},
+                {"serial_first": 9000, "serial_last": 9010},
+            ])
+
+            print("8. 百万级号段：入库一条记录，查询不逐号展开")
+            check("retract 303 (its failure would otherwise add to the count)", c.retract(303)[0], 303)
             check("upload 200 (2,000,000 serials)", c.upload(200, 0, 1_999_999, "1234567\n")[0], 303)
             start_t = time.perf_counter()
             big = c.query(0, 1_999_999)
             elapsed = time.perf_counter() - start_t
             check("2M serials counted exactly", big["summary"]["count"], 2_000_000)
-            check("only one failure", big["summary"]["fail"], 1)
-            check("segments stay tiny", len(big["segments"]), 3)
+            check("the expected serial is the failure", c.query(1234567, 1234567)["summary"]["fail"], 1)
+            check("302's own failure adds one more in the 2M span", big["summary"]["fail"], 2)
+            check("segments stay tiny (a handful, not 2,000,000)", len(big["segments"]) <= 12, True)
             check("query under 1s", elapsed < 1.0, True)
             print(f"      (2,000,000-number query took {elapsed * 1000:.1f} ms)")
 
         finally:
             stop(proc)
 
-        print("6. 重启后仍可查，结论与依据不变")
+        print("9. 重启后仍可查，结论与依据不变")
         proc = start(db, port)
         try:
             c = Client(base)
             after = c.query(0, 1_999_999)
             check("2M summary identical after restart", after["summary"], {
-                "pass": 1_999_999, "fail": 1, "pending": 0, "count": 2_000_000,
+                "pass": 1_999_998, "fail": 2, "pending": 0, "count": 2_000_000,
             })
             check("failed serial survives restart", c.query(1234567, 1234567)["summary"]["fail"], 1)
             check("retraction states survive restart", [
                 (r["report_no"], r["retracted"])
                 for r in json.loads(c.request("GET", "/api/reports")[1])["reports"]
-            ], [(200, False), (103, True), (102, True), (101, True)])
+            ], [
+                (303, True), (302, False), (301, True), (300, True),
+                (200, False), (103, True), (102, True), (101, True),
+            ])
+            check(
+                "retracted corrected report still ignored after restart",
+                c.query(7000, 7001)["evidence"][0]["report_no"],
+                200,
+            )
+            status, detail = c.request("GET", "/api/reports/300")
+            payload = json.loads(detail)
+            check("erratum record survives restart", payload["correction"]["new_first"], 7000)
+            check("retracted+corrected report still replays its erratum", c.correct(300, 3100, 3200, 7000)[0], 303)
+            check("changed erratum still conflicts after restart", c.correct(300, 3100, 3200, 7500)[0], 409)
         finally:
             stop(proc)
 
