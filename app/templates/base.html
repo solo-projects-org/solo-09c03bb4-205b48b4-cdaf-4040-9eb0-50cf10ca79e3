@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · 电表检定台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/reports">电表检定台</a>
+  <nav>
+    <a class="{{ 'on' if active_nav == 'reports' }}" href="/reports">检定报告</a>
+    <a class="{{ 'on' if active_nav == 'query' }}" href="/query">放行查询</a>
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>按报告号最大的有效报告判定；撤回后自动重判。</footer>
+</body>
+</html>

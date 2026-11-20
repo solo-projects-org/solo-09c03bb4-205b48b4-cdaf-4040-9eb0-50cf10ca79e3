@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+{% if flash %}
+  <section class="card flash {{ flash_kind }}">{{ flash }}</section>
+{% endif %}
+
+<section class="card">
+  <h2>上传检定报告</h2>
+  <form method="post" action="/reports" enctype="multipart/form-data" class="grid">
+    <label>报告号
+      <input name="report_no" inputmode="numeric" required placeholder="按检定先后递增"
+             value="{{ form.report_no }}">
+    </label>
+    <label>起始编号
+      <input name="serial_first" inputmode="numeric" required placeholder="含此编号"
+             value="{{ form.serial_first }}">
+    </label>
+    <label>结束编号
+      <input name="serial_last" inputmode="numeric" required placeholder="含此编号"
+             value="{{ form.serial_last }}">
+    </label>
+    <label class="wide">不合格名单 CSV
+      <input name="failures_csv" type="file" accept=".csv,.txt,text/csv,text/plain">
+      <span class="hint">每行一个编号，或用逗号/空白分隔；留空表示整段合格。支持 UTF-8 与 GB18030。</span>
+    </label>
+    <div class="wide actions">
+      <button type="submit">上传</button>
+      <span class="hint">上传可乱序；同号同内容重传不改变状态，同号异文整份拒收。</span>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <h2>报告台账</h2>
+  <div class="stats">
+    <div class="stat"><span>报告总数</span><strong>{{ overview.total }}</strong></div>
+    <div class="stat ok"><span>有效</span><strong>{{ overview.active }}</strong></div>
+    <div class="stat muted"><span>已撤回</span><strong>{{ overview.retracted }}</strong></div>
+    <div class="stat"><span>不合格记录</span><strong>{{ "{:,}".format(overview.failed_entries) }}</strong></div>
+  </div>
+  <table>
+    <thead>
+      <tr><th>报告号</th><th>覆盖号段</th><th>编号数</th><th>不合格数</th><th>状态</th><th>接收时间</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for r in reports %}
+      <tr id="report-{{ r.report_no }}" class="{{ 'retracted' if r.retracted }}">
+        <td><a href="/reports/{{ r.report_no }}">#{{ r.report_no }}</a></td>
+        <td class="range">{{ r.serial_first }} – {{ r.serial_last }}</td>
+        <td class="num">{{ "{:,}".format(r.serial_span) }}</td>
+        <td class="num">{{ r.failed_count }}</td>
+        <td>
+          {% if r.retracted %}
+            <span class="tag pending">已撤回</span>
+          {% else %}
+            <span class="tag pass">有效</span>
+          {% endif %}
+        </td>
+        <td class="muted">{{ r.created_at }}</td>
+        <td>
+          {% if not r.retracted %}
+            <form method="post" action="/reports/{{ r.report_no }}/retract" class="inline"
+                  onsubmit="return confirm('撤回报告 #{{ r.report_no }}？相关编号将按剩余报告重判。');">
+              <button class="danger small" type="submit">撤回</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="muted">尚无报告。上传第一份报告开始。</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if pages > 1 %}
+    <nav class="pager">
+      {% if page > 1 %}<a href="/reports?page={{ page - 1 }}">上一页</a>{% endif %}
+      <span>第 {{ page }} / {{ pages }} 页 · 共 {{ total }} 份</span>
+      {% if page < pages %}<a href="/reports?page={{ page + 1 }}">下一页</a>{% endif %}
+    </nav>
+  {% endif %}
+</section>
+{% endblock %}

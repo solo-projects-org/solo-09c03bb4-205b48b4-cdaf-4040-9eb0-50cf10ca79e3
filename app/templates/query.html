@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <form class="row" method="get" action="/query">
+    <label>起始编号
+      <input name="serial_first" inputmode="numeric" value="{{ serial_first }}" placeholder="例如 1000000" required>
+    </label>
+    <label>结束编号（含）
+      <input name="serial_last" inputmode="numeric" value="{{ serial_last }}" placeholder="例如 2000000" required>
+    </label>
+    <label class="narrow">最多区间数
+      <input name="max_segments" type="number" min="1" max="200000" value="{{ max_segments }}">
+    </label>
+    <button type="submit">查询</button>
+  </form>
+  <p class="hint">号段可跨百万个编号：只按“结论 + 依据报告”切分，不逐号展开。</p>
+</section>
+
+{% if error %}
+  <section class="card error">{{ error }}</section>
+{% endif %}
+
+{% if result %}
+  <section class="card">
+    <h2>查询 {{ result.serial_first }}–{{ result.serial_last }}</h2>
+    {% set s = result.summary %}
+    <div class="stats">
+      <div class="stat"><span>编号总数</span><strong>{{ "{:,}".format(s.count) }}</strong></div>
+      <div class="stat ok"><span>合格</span><strong>{{ "{:,}".format(s['pass']) }}</strong></div>
+      <div class="stat bad"><span>不合格</span><strong>{{ "{:,}".format(s['fail']) }}</strong></div>
+      <div class="stat muted"><span>待检</span><strong>{{ "{:,}".format(s['pending']) }}</strong></div>
+    </div>
+    {% if not result.complete %}
+      <p class="warn">
+        号段过长，明细仅列到编号 {{ result.covered_serial_last }}（上限 {{ result.max_segments }} 段）。
+        上方统计与汇总仍覆盖完整号段。
+      </p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>按结论与依据汇总</h2>
+    <p class="hint">本表覆盖整个查询号段，不受下方明细行数上限影响。</p>
+    <table>
+      <thead><tr><th>结论</th><th>依据报告</th><th>编号数</th></tr></thead>
+      <tbody>
+      {% for g in result.groups %}
+        <tr>
+          <td><span class="tag {{ g.conclusion }}">{{ g.conclusion_label }}</span></td>
+          <td>{% if g.report_no %}<a href="/reports/{{ g.report_no }}">#{{ g.report_no }}</a>{% else %}—{% endif %}</td>
+          <td class="num">{{ "{:,}".format(g.count) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>分段明细</h2>
+    {% if not result.complete %}
+      <p class="warn">
+        区间过多，仅列出到编号 {{ result.covered_serial_last }}（上限 {{ result.max_segments }} 段）。
+        上方汇总仍覆盖完整号段；需要逐段核对时请缩小区间或提高上限。
+      </p>
+    {% endif %}
+    <table>
+      <thead><tr><th>起始编号</th><th>结束编号</th><th>编号数</th><th>结论</th><th>依据报告</th></tr></thead>
+      <tbody>
+      {% for seg in result.segments %}
+        <tr>
+          <td class="range">{{ seg.serial_first }}</td>
+          <td class="range">{{ seg.serial_last }}</td>
+          <td class="num">{{ "{:,}".format(seg.count) }}</td>
+          <td><span class="tag {{ seg.conclusion }}">{{ seg.conclusion_label }}</span></td>
+          <td>{% if seg.report_no %}#{{ seg.report_no }}{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>依据报告快照</h2>
+    <p class="hint">结论与依据来自同一次读取的同一份已提交数据；重启后仍可重现。</p>
+    <table>
+      <thead><tr><th>报告号</th><th>覆盖范围</th><th>不合格数</th><th>接收时间</th></tr></thead>
+      <tbody>
+      {% for e in result.evidence %}
+        <tr>
+          <td><a href="/reports/{{ e.report_no }}">#{{ e.report_no }}</a></td>
+          <td class="range">{{ e.serial_first }} – {{ e.serial_last }}</td>
+          <td class="num">{{ e.failed_count }}</td>
+          <td class="muted">{{ e.created_at }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </section>
+{% endif %}
+{% endblock %}

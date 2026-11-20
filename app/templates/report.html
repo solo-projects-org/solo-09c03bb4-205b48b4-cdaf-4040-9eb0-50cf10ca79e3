@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <p><a href="/reports">← 返回报告台账</a></p>
+  <h2>报告 #{{ report.report_no }}</h2>
+  <div class="stats">
+    <div class="stat"><span>覆盖号段（含两端）</span><strong class="range">{{ report.serial_first }} – {{ report.serial_last }}</strong></div>
+    <div class="stat"><span>编号数</span><strong>{{ "{:,}".format(report.serial_span) }}</strong></div>
+    <div class="stat bad"><span>不合格数</span><strong>{{ report.failed_count }}</strong></div>
+    <div class="stat {{ 'muted' if report.retracted else 'ok' }}">
+      <span>状态</span>
+      <strong>{% if report.retracted %}已撤回{% else %}有效{% endif %}</strong>
+    </div>
+  </div>
+  <p class="hint">
+    接收时间 {{ report.created_at }}
+    {% if report.retracted_at %} · 撤回时间 {{ report.retracted_at }}{% endif %}
+  </p>
+  <p class="hint">
+    内容指纹 <code>{{ report.content_hash[:16] }}…</code>
+    （同号重传时用于判断是否同内容）
+  </p>
+  {% if not report.retracted %}
+    <form method="post" action="/reports/{{ report.report_no }}/retract" class="inline"
+          onsubmit="return confirm('撤回报告 #{{ report.report_no }}？相关编号将按剩余报告重判。');">
+      <button class="danger" type="submit">撤回此报告</button>
+    </form>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>不合格名单</h2>
+  {% if report.failed_count == 0 %}
+    <p>名单为空，整段合格。</p>
+  {% else %}
+    <p class="hint">
+      {% if report.failed_count > failures|length %}
+        共 {{ "{:,}".format(report.failed_count) }} 条，以下列出前 {{ failures|length }} 条。
+      {% else %}
+        共 {{ report.failed_count }} 条。
+      {% endif %}
+    </p>
+    <div class="serial-list">
+      {% for serial in failures %}<span class="chip">{{ serial }}</span>{% endfor %}
+    </div>
+  {% endif %}
+</section>
+{% endblock %}

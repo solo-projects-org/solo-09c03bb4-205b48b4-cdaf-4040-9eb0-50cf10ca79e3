@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card error">
+  <h2>{{ title }}</h2>
+  <p>{{ message }}</p>
+  <p><a href="/reports">返回报告台账</a> · <a href="/query">去放行查询</a></p>
+</section>
+{% endblock %}

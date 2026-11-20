@@ -1,0 +1,135 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --ink: #1d2430;
+  --muted: #6b7686;
+  --line: #dfe3ea;
+  --accent: #1f5fbf;
+  --ok: #1f7a4d;
+  --ok-bg: #e5f4ec;
+  --bad: #b03434;
+  --bad-bg: #fbe9e9;
+  --pend: #866200;
+  --pend-bg: #faf0d6;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 0 28px;
+  height: 56px;
+  background: #14243d;
+  color: #fff;
+}
+.topbar .brand { color: #fff; font-weight: 600; font-size: 17px; text-decoration: none; }
+.topbar nav { display: flex; gap: 20px; }
+.topbar nav a { color: #b9c6da; text-decoration: none; padding: 4px 2px; }
+.topbar nav a.on, .topbar nav a:hover { color: #fff; border-bottom: 2px solid #5b93e8; }
+
+main { max-width: 1100px; margin: 24px auto 40px; padding: 0 20px; }
+footer { text-align: center; color: var(--muted); font-size: 13px; padding-bottom: 32px; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 18px 22px;
+  margin-bottom: 18px;
+}
+.card h2 { margin: 0 0 14px; font-size: 17px; }
+
+form.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px 18px;
+}
+form.row { display: flex; flex-wrap: wrap; gap: 14px 18px; align-items: flex-end; }
+label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+label.narrow input { width: 130px; }
+label.wide, .wide { grid-column: 1 / -1; }
+input {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
+}
+input:focus { outline: 2px solid #b9d0f2; border-color: var(--accent); }
+
+button {
+  padding: 9px 20px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { background: #184c9b; }
+button.small { padding: 4px 12px; font-size: 13px; }
+button.danger { background: transparent; color: var(--bad); border: 1px solid #e3b6b6; }
+button.danger:hover { background: var(--bad-bg); }
+
+.actions { display: flex; align-items: center; gap: 16px; }
+.hint { color: var(--muted); font-size: 12.5px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 13px; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.range { font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.retracted td { color: var(--muted); }
+tr.retracted td.range { text-decoration: line-through; }
+
+.tag { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12.5px; }
+.tag.pass { background: var(--ok-bg); color: var(--ok); }
+.tag.fail { background: var(--bad-bg); color: var(--bad); }
+.tag.pending { background: var(--pend-bg); color: var(--pend); }
+
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.stat {
+  flex: 1 1 150px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stat span { color: var(--muted); font-size: 12.5px; }
+.stat strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.stat.ok strong { color: var(--ok); }
+.stat.bad strong { color: var(--bad); }
+.stat.muted strong { color: var(--muted); }
+
+.card.flash { border-left: 4px solid var(--ok); }
+.card.flash.info { border-left-color: var(--accent); }
+.card.flash.error { border-left-color: var(--bad); color: var(--bad); }
+.card.error { border-left: 4px solid var(--bad); color: var(--bad); }
+.warn { color: var(--bad); }
+
+.serial-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font-variant-numeric: tabular-nums;
+  background: var(--bad-bg);
+  color: var(--bad);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font-size: 13px;
+}
+code { font-size: 13px; }
+
+form.inline { display: inline; margin: 0; }
+.pager { display: flex; gap: 16px; justify-content: center; margin-top: 14px; font-size: 13px; }
+.pager a { color: var(--accent); text-decoration: none; }
